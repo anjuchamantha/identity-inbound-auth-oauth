@@ -31,15 +31,18 @@ import org.osgi.service.component.annotations.Reference;
 import org.osgi.service.component.annotations.ReferenceCardinality;
 import org.osgi.service.component.annotations.ReferencePolicy;
 import org.wso2.carbon.context.PrivilegedCarbonContext;
+import org.wso2.carbon.identity.api.resource.mgt.APIResourceManager;
 import org.wso2.carbon.identity.application.authentication.framework.ApplicationAuthenticationService;
 import org.wso2.carbon.identity.application.authentication.framework.AuthenticationDataPublisher;
 import org.wso2.carbon.identity.application.authentication.framework.AuthenticationMethodNameTranslator;
 import org.wso2.carbon.identity.application.authentication.framework.util.FrameworkConstants;
 import org.wso2.carbon.identity.application.mgt.ApplicationManagementService;
+import org.wso2.carbon.identity.application.mgt.AuthorizedAPIManagementService;
 import org.wso2.carbon.identity.application.mgt.listener.ApplicationMgtListener;
 import org.wso2.carbon.identity.consent.server.configs.mgt.services.ConsentServerConfigsManagementService;
 import org.wso2.carbon.identity.core.SAMLSSOServiceProviderManager;
 import org.wso2.carbon.identity.core.util.IdentityCoreInitializedEvent;
+import org.wso2.carbon.identity.core.util.IdentityUtil;
 import org.wso2.carbon.identity.event.handler.AbstractEventHandler;
 import org.wso2.carbon.identity.event.services.IdentityEventService;
 import org.wso2.carbon.identity.oauth.common.OAuthConstants;
@@ -49,6 +52,7 @@ import org.wso2.carbon.identity.oauth.dto.ScopeDTO;
 import org.wso2.carbon.identity.oauth.internal.OAuthComponentServiceHolder;
 import org.wso2.carbon.identity.oauth.tokenprocessor.OAuth2RevocationProcessor;
 import org.wso2.carbon.identity.oauth.tokenprocessor.RefreshTokenGrantProcessor;
+import org.wso2.carbon.identity.oauth.tokenprocessor.TokenProvider;
 import org.wso2.carbon.identity.oauth2.OAuth2ScopeService;
 import org.wso2.carbon.identity.oauth2.OAuth2Service;
 import org.wso2.carbon.identity.oauth2.OAuth2TokenValidationService;
@@ -69,9 +73,11 @@ import org.wso2.carbon.identity.oauth2.device.response.DeviceFlowResponseTypeReq
 import org.wso2.carbon.identity.oauth2.keyidprovider.DefaultKeyIDProviderImpl;
 import org.wso2.carbon.identity.oauth2.keyidprovider.KeyIDProvider;
 import org.wso2.carbon.identity.oauth2.listener.TenantCreationEventListener;
+import org.wso2.carbon.identity.oauth2.scopeservice.APIResourceBasedScopeMetadataService;
 import org.wso2.carbon.identity.oauth2.scopeservice.ScopeMetadataService;
 import org.wso2.carbon.identity.oauth2.token.bindings.TokenBinder;
 import org.wso2.carbon.identity.oauth2.token.bindings.handlers.TokenBindingExpiryEventHandler;
+import org.wso2.carbon.identity.oauth2.token.bindings.impl.CertificateBasedTokenBinder;
 import org.wso2.carbon.identity.oauth2.token.bindings.impl.CookieBasedTokenBinder;
 import org.wso2.carbon.identity.oauth2.token.bindings.impl.DeviceFlowTokenBinder;
 import org.wso2.carbon.identity.oauth2.token.bindings.impl.SSOSessionBasedTokenBinder;
@@ -79,6 +85,10 @@ import org.wso2.carbon.identity.oauth2.token.handlers.claims.JWTAccessTokenClaim
 import org.wso2.carbon.identity.oauth2.util.OAuth2Util;
 import org.wso2.carbon.identity.oauth2.validators.scope.RoleBasedScopeIssuer;
 import org.wso2.carbon.identity.oauth2.validators.scope.ScopeValidator;
+import org.wso2.carbon.identity.oauth2.validators.validationhandler.ScopeValidationHandler;
+import org.wso2.carbon.identity.oauth2.validators.validationhandler.impl.M2MScopeValidationHandler;
+import org.wso2.carbon.identity.oauth2.validators.validationhandler.impl.NoPolicyScopeValidationHandler;
+import org.wso2.carbon.identity.oauth2.validators.validationhandler.impl.RoleBasedScopeValidationHandler;
 import org.wso2.carbon.identity.openidconnect.OpenIDConnectClaimFilter;
 import org.wso2.carbon.identity.openidconnect.OpenIDConnectClaimFilterImpl;
 import org.wso2.carbon.identity.openidconnect.dao.ScopeClaimMappingDAO;
@@ -87,6 +97,7 @@ import org.wso2.carbon.identity.organization.management.role.management.service.
 import org.wso2.carbon.identity.organization.management.service.OrganizationManagementInitialize;
 import org.wso2.carbon.identity.organization.management.service.OrganizationManager;
 import org.wso2.carbon.identity.organization.management.service.OrganizationUserResidentResolverService;
+import org.wso2.carbon.identity.role.v2.mgt.core.RoleManagementService;
 import org.wso2.carbon.identity.user.store.configuration.listener.UserStoreConfigListener;
 import org.wso2.carbon.idp.mgt.IdpManager;
 import org.wso2.carbon.registry.core.service.RegistryService;
@@ -188,6 +199,12 @@ public class OAuth2ServiceComponent {
     protected void activate(ComponentContext context) {
 
         try {
+            // Check if server compliant with the client ID tenant unification.
+            if (!OAuth2Util.isCompliantWithClientIDTenantUnification()) {
+                throw new RuntimeException("The unique key constraint in the IDN_OAUTH_CONSUMER_APPS table is not " +
+                        "compatible with the server configs on tenant qualified URLs and/ or tenanted sessions.");
+            }
+
             if (OAuth2ServiceComponentHolder.getInstance().getScopeClaimMappingDAO() == null) {
                 OAuth2ServiceComponentHolder.getInstance()
                         .setScopeClaimMappingDAO(new ScopeClaimMappingDAOImpl());
@@ -240,6 +257,14 @@ public class OAuth2ServiceComponent {
             if (OAuth2Util.getSupportedGrantTypes().contains(DEVICE_FLOW_GRANT_TYPE)) {
                 DeviceFlowTokenBinder deviceFlowTokenBinder = new DeviceFlowTokenBinder();
                 bundleContext.registerService(TokenBinderInfo.class.getName(), deviceFlowTokenBinder, null);
+            }
+
+            /* Certificate based token binder will be enabled only if certificate binding is not being performed in the
+               MTLS authenticator. By default, the certificate binding type will be enabled. */
+            if (Boolean.parseBoolean(IdentityUtil
+                    .getProperty(OAuthConstants.ENABLE_TLS_CERT_BOUND_ACCESS_TOKENS_VIA_BINDING_TYPE))) {
+                CertificateBasedTokenBinder certificateBasedTokenBinder = new CertificateBasedTokenBinder();
+                bundleContext.registerService(TokenBinderInfo.class.getName(), certificateBasedTokenBinder, null);
             }
 
             bundleContext.registerService(ResponseTypeRequestValidator.class.getName(),
@@ -329,11 +354,18 @@ public class OAuth2ServiceComponent {
             OAuth2ScopeService oAuth2ScopeService = new OAuth2ScopeService();
             // Registering OAuth2ScopeService as a OSGIService
             bundleContext.registerService(OAuth2ScopeService.class.getName(), oAuth2ScopeService, null);
-            // Registering OAuth2ScopeService under ScopeService interface as the default service.
+            // Registering OAuth2ScopeService under ScopeService interface.
             bundleContext.registerService(ScopeMetadataService.class, oAuth2ScopeService, null);
+
+            // Registering API Resource based scope metadata service under ScopeService interface.
+            bundleContext.registerService(ScopeMetadataService.class, new APIResourceBasedScopeMetadataService(), null);
+
+            bundleContext.registerService(ScopeValidationHandler.class, new RoleBasedScopeValidationHandler(), null);
+            bundleContext.registerService(ScopeValidationHandler.class, new NoPolicyScopeValidationHandler(), null);
+            bundleContext.registerService(ScopeValidationHandler.class, new M2MScopeValidationHandler(), null);
+
             // Note : DO NOT add any activation related code below this point,
             // to make sure the server doesn't start up if any activation failures occur
-
         } catch (Throwable e) {
             String errMsg = "Error while activating OAuth2ServiceComponent.";
             log.error(errMsg, e);
@@ -607,6 +639,29 @@ public class OAuth2ServiceComponent {
     }
 
     @Reference(
+            name = "scope.validator.handler",
+            service = ScopeValidationHandler.class,
+            cardinality = ReferenceCardinality.MULTIPLE,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "removeScopeValidationHandler"
+    )
+    protected void addScopeValidationHandler(ScopeValidationHandler scopeValidationHandler) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Adding the Scope validation handler Service : " + scopeValidationHandler.getName());
+        }
+        OAuthComponentServiceHolder.getInstance().addScopeValidationHandler(scopeValidationHandler);
+    }
+
+    protected void removeScopeValidationHandler(ScopeValidationHandler scopeValidationHandler) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Removing the Scope validator Service : " + scopeValidationHandler.getName());
+        }
+        OAuthComponentServiceHolder.getInstance().removeScopeValidationHandler(scopeValidationHandler);
+    }
+
+    @Reference(
             name = "IdentityProviderManager",
             service = org.wso2.carbon.idp.mgt.IdpManager.class,
             cardinality = ReferenceCardinality.MANDATORY,
@@ -701,6 +756,39 @@ public class OAuth2ServiceComponent {
             log.debug("Unset organization user resident resolver service.");
         }
         OAuth2ServiceComponentHolder.setOrganizationUserResidentResolverService(null);
+    }
+
+    /**
+     * Sets the token provider.
+     *
+     * @param tokenProvider TokenProvider
+     */
+    @Reference(
+            name = "token.provider",
+            service = TokenProvider.class,
+            cardinality = ReferenceCardinality.OPTIONAL,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "unsetTokenProvider"
+    )
+    protected void setTokenProvider(TokenProvider tokenProvider) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Setting token provider.");
+        }
+        OAuth2ServiceComponentHolder.getInstance().setTokenProvider(tokenProvider);
+    }
+
+    /**
+     * Unsets the token provider.
+     *
+     * @param tokenProvider TokenProvider
+     */
+    protected void unsetTokenProvider(TokenProvider tokenProvider) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Unset token provider.");
+        }
+        OAuth2ServiceComponentHolder.getInstance().setTokenProvider(null);
     }
 
     /**
@@ -1187,5 +1275,85 @@ public class OAuth2ServiceComponent {
     protected void unsetRealmService(RealmService realmService) {
 
         OAuth2ServiceComponentHolder.getInstance().setRealmService(null);
+    }
+
+    @Reference(
+            name = "identity.authorized.api.management.component",
+            service = AuthorizedAPIManagementService.class,
+            cardinality = ReferenceCardinality.MANDATORY,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "unsetAuthorizedAPIManagementService"
+    )
+    protected void setAuthorizedAPIManagementService(AuthorizedAPIManagementService authorizedAPIManagementService) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Adding Authorized API Management Service: " + authorizedAPIManagementService.getClass()
+                    .getName());
+        }
+        OAuth2ServiceComponentHolder.getInstance()
+                .setAuthorizedAPIManagementService(authorizedAPIManagementService);
+    }
+
+    protected void unsetAuthorizedAPIManagementService(AuthorizedAPIManagementService authorizedAPIManagementService) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Removing Authorized API Management Service: " + authorizedAPIManagementService.getClass()
+                    .getName());
+        }
+        OAuth2ServiceComponentHolder.getInstance().setAuthorizedAPIManagementService(null);
+    }
+
+    @Reference(
+            name = "api.resource.mgt.service.component",
+            service = APIResourceManager.class,
+            cardinality = ReferenceCardinality.MANDATORY,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "unsetAPIResourceManagerService"
+    )
+    protected void setAPIResourceManagerService(APIResourceManager apiResourceManager) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Adding API Resource Manager: " + apiResourceManager.getClass().getName());
+        }
+        OAuth2ServiceComponentHolder.getInstance().setApiResourceManager(apiResourceManager);
+    }
+    protected void unsetAPIResourceManagerService(APIResourceManager apiResourceManager) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Removing API Resource Manager: " + apiResourceManager.getClass().getName());
+        }
+        OAuth2ServiceComponentHolder.getInstance().setApiResourceManager(null);
+    }
+
+    /**
+     * Set role management service V2 implementation.
+     *
+     * @param roleManagementService RoleManagementServiceV2.
+     */
+    @Reference(
+            name = "org.wso2.carbon.identity.role.v2.mgt.core.RoleManagementService",
+            service = org.wso2.carbon.identity.role.v2.mgt.core.RoleManagementService.class,
+            cardinality = ReferenceCardinality.MANDATORY,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "unsetRoleManagementServiceV2")
+    protected void setRoleManagementServiceV2(RoleManagementService roleManagementService) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Adding Role Management  Service V2: " + roleManagementService.getClass().getName());
+        }
+        OAuth2ServiceComponentHolder.getInstance().setRoleManagementServiceV2(roleManagementService);
+    }
+
+    /**
+     * Unset role management service V2 implementation.
+     *
+     * @param roleManagementService RoleManagementServiceV2
+     */
+    protected void unsetRoleManagementServiceV2(RoleManagementService roleManagementService) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Removing Role Management  Service V2: " + roleManagementService.getClass().getName());
+        }
+        OAuth2ServiceComponentHolder.getInstance().setRoleManagementServiceV2(null);
     }
 }

@@ -30,7 +30,8 @@ import org.apache.commons.logging.LogFactory;
 import org.wso2.carbon.identity.application.common.model.ServiceProviderProperty;
 import org.wso2.carbon.identity.core.util.IdentityUtil;
 import org.wso2.carbon.identity.oauth.common.OAuth2ErrorCodes;
-import org.wso2.carbon.identity.oauth2.IdentityOAuth2ClientException;
+import org.wso2.carbon.identity.oauth.common.exception.InvalidOAuthClientException;
+import org.wso2.carbon.identity.oauth.dao.OAuthAppDO;
 import org.wso2.carbon.identity.oauth2.IdentityOAuth2Exception;
 import org.wso2.carbon.identity.oauth2.RequestObjectException;
 import org.wso2.carbon.identity.oauth2.model.OAuth2Parameters;
@@ -70,6 +71,19 @@ public class RequestObjectValidatorUtil {
         boolean isVerified;
         Certificate certificate = null;
         SignedJWT jwt = requestObject.getSignedJWT();
+        OAuthAppDO oAuthAppDO = null;
+        try {
+            oAuthAppDO = OAuth2Util.getAppInformationByClientId(oAuth2Parameters.getClientId(),
+                    oAuth2Parameters.getTenantDomain());
+            String algorithm = oAuthAppDO.getRequestObjectSignatureAlgorithm();
+            if (StringUtils.isNotEmpty(algorithm) && !algorithm.equals(jwt.getHeader().getAlgorithm().getName())) {
+                throw new RequestObjectException("Request Object signature verification failed. Invalid signature " +
+                        "algorithm.", OAuth2ErrorCodes.INVALID_REQUEST);
+            }
+        } catch (IdentityOAuth2Exception | InvalidOAuthClientException e) {
+            throw new RequestObjectException(OAuth2ErrorCodes.SERVER_ERROR, "Error while retrieving Oauth application "
+                    + "to check signature algorithm.", e);
+        }
         try {
             certificate =
                     getCertificateForAlias(oAuth2Parameters.getTenantDomain(), oAuth2Parameters.getClientId());
@@ -312,7 +326,7 @@ public class RequestObjectValidatorUtil {
 
         try {
             return OAuth2Util.isFapiConformantApp(clientId);
-        } catch (IdentityOAuth2ClientException e) {
+        } catch (InvalidOAuthClientException e) {
             throw new RequestObjectException(OAuth2ErrorCodes.INVALID_CLIENT, "Could not find an existing app for " +
                     "clientId: " + clientId, e);
         } catch (IdentityOAuth2Exception e) {

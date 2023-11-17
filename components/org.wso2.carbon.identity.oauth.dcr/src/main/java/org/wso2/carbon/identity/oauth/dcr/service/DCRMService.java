@@ -19,6 +19,7 @@
 package org.wso2.carbon.identity.oauth.dcr.service;
 
 import com.google.gson.Gson;
+import com.nimbusds.jwt.SignedJWT;
 import org.apache.commons.lang.ArrayUtils;
 import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
@@ -34,7 +35,9 @@ import org.wso2.carbon.identity.application.common.model.User;
 import org.wso2.carbon.identity.application.common.util.IdentityApplicationConstants;
 import org.wso2.carbon.identity.application.mgt.ApplicationManagementService;
 import org.wso2.carbon.identity.application.mgt.ApplicationMgtUtil;
+import org.wso2.carbon.identity.core.util.IdentityUtil;
 import org.wso2.carbon.identity.oauth.IdentityOAuthAdminException;
+import org.wso2.carbon.identity.oauth.IdentityOAuthClientException;
 import org.wso2.carbon.identity.oauth.OAuthAdminService;
 import org.wso2.carbon.identity.oauth.common.OAuthConstants;
 import org.wso2.carbon.identity.oauth.common.exception.InvalidOAuthClientException;
@@ -52,11 +55,16 @@ import org.wso2.carbon.identity.oauth.dcr.util.DCRMUtils;
 import org.wso2.carbon.identity.oauth.dcr.util.ErrorCodes;
 import org.wso2.carbon.identity.oauth.dto.OAuthConsumerAppDTO;
 import org.wso2.carbon.identity.oauth2.IdentityOAuth2Exception;
+import org.wso2.carbon.identity.oauth2.OAuth2Constants;
+import org.wso2.carbon.identity.oauth2.util.JWTSignatureValidationUtils;
 import org.wso2.carbon.identity.oauth2.util.OAuth2Util;
 
+import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Pattern;
 
 import static org.wso2.carbon.identity.oauth.Error.INVALID_OAUTH_CLIENT;
@@ -68,12 +76,13 @@ public class DCRMService {
 
     private static final Log log = LogFactory.getLog(DCRMService.class);
     private static OAuthAdminService oAuthAdminService = new OAuthAdminService();
-
     private static final String AUTH_TYPE_OAUTH_2 = "oauth2";
     private static final String OAUTH_VERSION = "OAuth-2.0";
     private static final String GRANT_TYPE_SEPARATOR = " ";
     private static final String APP_DISPLAY_NAME = "DisplayName";
     private static Pattern clientIdRegexPattern = null;
+    private static final String SSA_VALIDATION_JWKS = "OAuth.DCRM.SoftwareStatementJWKS";
+
 
     /**
      * Get OAuth2/OIDC application information with client_id.
@@ -221,6 +230,15 @@ public class DCRMService {
                 throw DCRMUtils.generateClientException(DCRMConstants.ErrorMessages.FAILED_TO_GET_SP,
                         appDTO.getApplicationName(), null);
             }
+            // Validate software statement assertion signature.
+            if (StringUtils.isNotEmpty(updateRequest.getSoftwareStatement())) {
+                try {
+                    validateSSASignature(updateRequest.getSoftwareStatement());
+                } catch (IdentityOAuth2Exception e) {
+                    throw new DCRMClientException(DCRMConstants.ErrorCodes.INVALID_SOFTWARE_STATEMENT,
+                            DCRMConstants.ErrorMessages.SIGNATURE_VALIDATION_FAILED.getMessage(), e);
+                }
+            }
             // Update the service provider properties list with the display name property.
             updateServiceProviderPropertyList(sp, updateRequest.getExtApplicationDisplayName());
             // Update jwksURI.
@@ -292,8 +310,7 @@ public class DCRMService {
                 appDTO.setIdTokenEncryptionMethod(updateRequest.getIdTokenEncryptionMethod());
             }
             if (updateRequest.getRequestObjectSignatureAlgorithm() != null) {
-                appDTO.setRequestObjectSignatureValidationEnabled
-                        (updateRequest.isRequireSignedRequestObject());
+                appDTO.setRequestObjectSignatureAlgorithm(updateRequest.getRequestObjectSignatureAlgorithm());
             }
             if (updateRequest.getTlsClientAuthSubjectDN() != null) {
                 appDTO.setTlsClientAuthSubjectDN(updateRequest.getTlsClientAuthSubjectDN());
@@ -310,11 +327,23 @@ public class DCRMService {
             }
             appDTO.setRequestObjectSignatureValidationEnabled(updateRequest.isRequireSignedRequestObject());
             appDTO.setRequirePushedAuthorizationRequests(updateRequest.isRequirePushedAuthorizationRequests());
-            appDTO.setTlsClientCertificateBoundAccessTokens(updateRequest.isTlsClientCertificateBoundAccessTokens());
+            if (updateRequest.isTlsClientCertificateBoundAccessTokens()) {
+                boolean isCertificateTokenBinderAvailable = DCRDataHolder.getInstance().getTokenBinders().stream()
+                        .anyMatch(t -> OAuth2Constants.TokenBinderType.CERTIFICATE_BASED_TOKEN_BINDER
+                                .equals(t.getBindingType()));
+                if (isCertificateTokenBinderAvailable) {
+                    appDTO.setTokenBindingType(OAuth2Constants.TokenBinderType.CERTIFICATE_BASED_TOKEN_BINDER);
+                    appDTO.setTokenBindingValidationEnabled(true);
+                }
+            } else {
+                appDTO.setTokenBindingType(OAuthConstants.TokenBindings.NONE);
+            }
             appDTO.setPkceMandatory(updateRequest.isExtPkceMandatory());
             appDTO.setPkceSupportPlain(updateRequest.isExtPkceSupportPlain());
             appDTO.setBypassClientCredentials(updateRequest.isExtPublicClient());
             oAuthAdminService.updateConsumerApplication(appDTO);
+        } catch (IdentityOAuthClientException e) {
+            throw new DCRMClientException(DCRMConstants.ErrorCodes.INVALID_CLIENT_METADATA, e.getMessage(), e);
         } catch (IdentityOAuthAdminException e) {
             throw DCRMUtils.generateServerException(
                     DCRMConstants.ErrorMessages.FAILED_TO_UPDATE_APPLICATION, clientId, e);
@@ -322,7 +351,9 @@ public class DCRMService {
         OAuthConsumerAppDTO oAuthConsumerAppDTO = getApplicationById(clientId);
         // Setting the jwksURI to be sent in the response.
         oAuthConsumerAppDTO.setJwksURI(updateRequest.getJwksURI());
-        return buildResponse(oAuthConsumerAppDTO);
+        Application application = buildResponse(oAuthConsumerAppDTO);
+        application.setSoftwareStatement(updateRequest.getSoftwareStatement());
+        return application;
     }
 
     /**
@@ -414,6 +445,15 @@ public class DCRMService {
             throw DCRMUtils.generateClientException(DCRMConstants.ErrorMessages.CONFLICT_EXISTING_CLIENT_ID,
                     registrationRequest.getConsumerKey());
         }
+        // Validate software statement assertion signature.
+        if (StringUtils.isNotEmpty(registrationRequest.getSoftwareStatement())) {
+            try {
+                validateSSASignature(registrationRequest.getSoftwareStatement());
+            } catch (IdentityOAuth2Exception e) {
+                throw new DCRMClientException(DCRMConstants.ErrorCodes.INVALID_SOFTWARE_STATEMENT,
+                        DCRMConstants.ErrorMessages.SIGNATURE_VALIDATION_FAILED.getMessage(), e);
+            }
+        }
 
         // Create a service provider.
         ServiceProvider serviceProvider = createServiceProvider(applicationOwner, tenantDomain, spName, templateName,
@@ -448,7 +488,9 @@ public class DCRMService {
             deleteApplication(createdApp.getOauthConsumerKey());
             throw ex;
         }
-        return buildResponse(createdApp);
+        Application application = buildResponse(createdApp);
+        application.setSoftwareStatement(registrationRequest.getSoftwareStatement());
+        return application;
     }
 
     private Application buildResponse(OAuthConsumerAppDTO createdApp) {
@@ -481,7 +523,9 @@ public class DCRMService {
         application.setRequestObjectEncryptionAlgorithm(createdApp.getRequestObjectEncryptionAlgorithm());
         application.setRequestObjectEncryptionMethod(createdApp.getRequestObjectEncryptionMethod());
         application.setRequirePushedAuthorizationRequests(createdApp.getRequirePushedAuthorizationRequests());
-        application.setTlsClientCertificateBoundAccessTokens(createdApp.getTlsClientCertificateBoundAccessTokens());
+        if (OAuth2Constants.TokenBinderType.CERTIFICATE_BASED_TOKEN_BINDER.equals(createdApp.getTokenBindingType())) {
+            application.setTlsClientCertificateBoundAccessTokens(true);
+        }
         return application;
     }
 
@@ -591,11 +635,28 @@ public class DCRMService {
         oAuthConsumerApp.setRequestObjectSignatureValidationEnabled(registrationRequest.isRequireSignedRequestObject());
         oAuthConsumerApp.setRequirePushedAuthorizationRequests(
                 registrationRequest.isRequirePushedAuthorizationRequests());
-        oAuthConsumerApp.setTlsClientCertificateBoundAccessTokens(
-                registrationRequest.isTlsClientCertificateBoundAccessTokens());
+        if (registrationRequest.isTlsClientCertificateBoundAccessTokens()) {
+            boolean isCertificateTokenBinderAvailable = DCRDataHolder.getInstance().getTokenBinders().stream()
+                    .anyMatch(t -> OAuth2Constants.TokenBinderType.CERTIFICATE_BASED_TOKEN_BINDER
+                            .equals(t.getBindingType()));
+            if (isCertificateTokenBinderAvailable) {
+                oAuthConsumerApp.setTokenBindingType(OAuth2Constants.TokenBinderType.CERTIFICATE_BASED_TOKEN_BINDER);
+                oAuthConsumerApp.setTokenBindingValidationEnabled(true);
+            }
+        }
         oAuthConsumerApp.setPkceMandatory(registrationRequest.isExtPkceMandatory());
         oAuthConsumerApp.setPkceSupportPlain(registrationRequest.isExtPkceSupportPlain());
         oAuthConsumerApp.setBypassClientCredentials(registrationRequest.isExtPublicClient());
+        boolean enableFAPI = Boolean.parseBoolean(IdentityUtil.getProperty(OAuthConstants.ENABLE_FAPI));
+        if (enableFAPI) {
+            boolean enableFAPIDCR = Boolean.parseBoolean(IdentityUtil.getProperty(
+                    OAuthConstants.ENABLE_DCR_FAPI_ENFORCEMENT));
+            if (enableFAPIDCR) {
+                // Add FAPI conformant property to Oauth application.
+                oAuthConsumerApp.setFapiConformanceEnabled(true);
+            }
+        }
+
         if (log.isDebugEnabled()) {
             log.debug("Creating OAuth Application: " + spName + " in tenant: " + tenantDomain);
         }
@@ -603,6 +664,8 @@ public class DCRMService {
         OAuthConsumerAppDTO createdApp;
         try {
             createdApp = oAuthAdminService.registerAndRetrieveOAuthApplicationData(oAuthConsumerApp);
+        } catch (IdentityOAuthClientException e) {
+            throw new DCRMClientException(DCRMConstants.ErrorCodes.INVALID_CLIENT_METADATA, e.getMessage(), e);
         } catch (IdentityOAuthAdminException e) {
             throw DCRMUtils.generateServerException(
                     DCRMConstants.ErrorMessages.FAILED_TO_REGISTER_APPLICATION, spName, e);
@@ -629,6 +692,10 @@ public class DCRMService {
         sp.setOwner(user);
         sp.setDescription("Service Provider for application " + spName);
         sp.setManagementApp(isManagementApp);
+
+        Map<String, Object> spProperties = new HashMap<>();
+        spProperties.put(OAuthConstants.IS_THIRD_PARTY_APP, true);
+        addSPProperties(spProperties, sp);
 
         createServiceProvider(sp, tenantDomain, applicationOwner, templateName);
 
@@ -924,5 +991,53 @@ public class DCRMService {
         Gson gson = new Gson();
         ServiceProvider clonedServiceProvider = gson.fromJson(gson.toJson(serviceProvider), ServiceProvider.class);
         return clonedServiceProvider;
+    }
+
+    /**
+     * Validate SSA signature using jwks_uri.
+     * @param softwareStatement Software Statement
+     * @throws DCRMClientException
+     * @throws IdentityOAuth2Exception
+     */
+    private void validateSSASignature(String softwareStatement) throws DCRMClientException, IdentityOAuth2Exception {
+
+        String jwksURL = IdentityUtil.getProperty(SSA_VALIDATION_JWKS);
+        if (StringUtils.isNotEmpty(jwksURL)) {
+            try {
+                SignedJWT signedJWT = SignedJWT.parse(softwareStatement);
+                if (!JWTSignatureValidationUtils.validateUsingJWKSUri(signedJWT, jwksURL)) {
+                    throw new DCRMClientException(DCRMConstants.ErrorCodes.INVALID_SOFTWARE_STATEMENT,
+                            DCRMConstants.ErrorMessages.SIGNATURE_VALIDATION_FAILED.getMessage());
+                }
+            } catch (ParseException e) {
+                throw new DCRMClientException(DCRMConstants.ErrorCodes.INVALID_SOFTWARE_STATEMENT,
+                        DCRMConstants.ErrorMessages.SIGNATURE_VALIDATION_FAILED.getMessage(), e);
+            }
+
+        } else {
+            log.debug("Skipping Software Statement signature validation as jwks_uri is not configured.");
+        }
+    }
+
+    /**
+     * Add the properties to the service provider.
+     * @param spProperties Map of property name and values to be added.
+     * @param serviceProvider ServiceProvider object.
+     */
+    private void addSPProperties(Map<String, Object> spProperties, ServiceProvider serviceProvider) {
+
+        ServiceProviderProperty[] serviceProviderProperties = serviceProvider.getSpProperties();
+        for (Map.Entry<String, Object> entry : spProperties.entrySet()) {
+            boolean propertyExists = Arrays.stream(serviceProviderProperties)
+                    .anyMatch(property -> property.getName().equals(entry.getKey()));
+            if (!propertyExists) {
+                ServiceProviderProperty serviceProviderProperty = new ServiceProviderProperty();
+                serviceProviderProperty.setName(entry.getKey());
+                serviceProviderProperty.setValue(entry.getValue().toString());
+                serviceProviderProperties = (ServiceProviderProperty[]) ArrayUtils.add(serviceProviderProperties,
+                        serviceProviderProperty);
+            }
+        }
+        serviceProvider.setSpProperties(serviceProviderProperties);
     }
 }

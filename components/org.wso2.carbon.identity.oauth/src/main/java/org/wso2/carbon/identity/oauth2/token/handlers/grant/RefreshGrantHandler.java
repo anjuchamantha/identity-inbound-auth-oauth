@@ -38,6 +38,7 @@ import org.wso2.carbon.identity.oauth.common.exception.InvalidOAuthClientExcepti
 import org.wso2.carbon.identity.oauth.config.OAuthServerConfiguration;
 import org.wso2.carbon.identity.oauth.dao.OAuthAppDO;
 import org.wso2.carbon.identity.oauth.tokenprocessor.RefreshTokenGrantProcessor;
+import org.wso2.carbon.identity.oauth2.IdentityOAuth2ClientException;
 import org.wso2.carbon.identity.oauth2.IdentityOAuth2Exception;
 import org.wso2.carbon.identity.oauth2.ResponseHeader;
 import org.wso2.carbon.identity.oauth2.dao.OAuthTokenPersistenceFactory;
@@ -62,6 +63,7 @@ import java.util.stream.Stream;
 
 import static org.wso2.carbon.identity.oauth.common.OAuthConstants.TokenBindings.NONE;
 import static org.wso2.carbon.identity.oauth2.util.OAuth2Util.buildCacheKeyStringForTokenWithUserId;
+import static org.wso2.carbon.identity.oauth2.util.OAuth2Util.buildCacheKeyStringForTokenWithUserIdOrgId;
 
 /**
  * Grant Type handler for Grant Type refresh_token which is used to get a new access token.
@@ -290,8 +292,12 @@ public class RefreshGrantHandler extends AbstractAuthorizationGrantHandler {
                         + tokReqMsgCtx.getAuthorizedUser().getLoggableUserId(), e);
             }
             String authenticatedIDP = tokReqMsgCtx.getAuthorizedUser().getFederatedIdPName();
-            String cacheKeyString = buildCacheKeyStringForTokenWithUserId(clientId, scope, userId,
-                    authenticatedIDP, oldAccessToken.getTokenBindingReference());
+            String accessingOrganization = OAuthConstants.AuthorizedOrganization.NONE;
+            if (!StringUtils.isEmpty(oldAccessToken.getAuthorizedUser().getAccessingOrganization())) {
+                accessingOrganization = oldAccessToken.getAuthorizedUser().getAccessingOrganization();
+            }
+            String cacheKeyString = buildCacheKeyStringForTokenWithUserIdOrgId(clientId, scope, userId,
+                    authenticatedIDP, oldAccessToken.getTokenBindingReference(), accessingOrganization);
             OAuthCacheKey oauthCacheKey = new OAuthCacheKey(cacheKeyString);
             OAuthCache.getInstance().clearCacheEntry(oauthCacheKey, accessTokenBean.getAuthzUser().getTenantDomain());
 
@@ -301,37 +307,43 @@ public class RefreshGrantHandler extends AbstractAuthorizationGrantHandler {
                 OAuthCache.getInstance().clearCacheEntry(accessTokenCacheKey,
                         oldAccessToken.getAuthorizedUser().getTenantDomain());
             }
-            AccessTokenDO tokenToCache = AccessTokenDO.clone(accessTokenBean);
-            OauthTokenIssuer oauthTokenIssuer;
-            try {
-                oauthTokenIssuer = OAuth2Util.getOAuthTokenIssuerForOAuthApp(
-                        tokReqMsgCtx.getOauth2AccessTokenReqDTO().getClientId());
-            } catch (InvalidOAuthClientException e) {
-                throw new IdentityOAuth2Exception(
-                        "Error while retrieving oauth issuer for the app with clientId: " +
-                        tokReqMsgCtx.getOauth2AccessTokenReqDTO().getClientId(), e);
-            }
-            if (oauthTokenIssuer.usePersistedAccessTokenAlias()) {
+            /*
+             * If no token persistence, the token will be not be cached against a cache key with userId, scope, client,
+             * idp and binding reference. But, token will be cached and managed as an AccessTokenDO against the
+             * token identifier.
+             */
+            if (OAuth2Util.isTokenPersistenceEnabled()) {
+                AccessTokenDO tokenToCache = AccessTokenDO.clone(accessTokenBean);
+                OauthTokenIssuer oauthTokenIssuer;
                 try {
-                    String persistedTokenIdentifier =
-                            oauthTokenIssuer.getAccessTokenHash(accessTokenBean.getAccessToken());
-                    tokenToCache.setAccessToken(persistedTokenIdentifier);
-                } catch (OAuthSystemException e) {
-                    if (log.isDebugEnabled()) {
-                        if (IdentityUtil.isTokenLoggable(IdentityConstants.IdentityTokens.ACCESS_TOKEN)) {
-                            log.debug("Token issuer: " + oauthTokenIssuer.getClass() + " was tried and" +
-                                    " failed to parse the received token " + tokenToCache.getAccessToken(), e);
-                        } else {
-                            log.debug("Token issuer: " + oauthTokenIssuer.getClass() + " was tried and" +
-                                    " failed to parse the received token.", e);
+                    oauthTokenIssuer = OAuth2Util.getOAuthTokenIssuerForOAuthApp(
+                            tokReqMsgCtx.getOauth2AccessTokenReqDTO().getClientId());
+                } catch (InvalidOAuthClientException e) {
+                    throw new IdentityOAuth2Exception(
+                            "Error while retrieving oauth issuer for the app with clientId: " +
+                                    tokReqMsgCtx.getOauth2AccessTokenReqDTO().getClientId(), e);
+                }
+                if (oauthTokenIssuer.usePersistedAccessTokenAlias()) {
+                    try {
+                        String persistedTokenIdentifier =
+                                oauthTokenIssuer.getAccessTokenHash(accessTokenBean.getAccessToken());
+                        tokenToCache.setAccessToken(persistedTokenIdentifier);
+                    } catch (OAuthSystemException e) {
+                        if (log.isDebugEnabled()) {
+                            if (IdentityUtil.isTokenLoggable(IdentityConstants.IdentityTokens.ACCESS_TOKEN)) {
+                                log.debug("Token issuer: " + oauthTokenIssuer.getClass() + " was tried and" +
+                                        " failed to parse the received token " + tokenToCache.getAccessToken(), e);
+                            } else {
+                                log.debug("Token issuer: " + oauthTokenIssuer.getClass() + " was tried and" +
+                                        " failed to parse the received token.", e);
+                            }
                         }
                     }
                 }
+
+                // Add new access token to the OAuthCache
+                OAuthCache.getInstance().addToCache(oauthCacheKey, tokenToCache);
             }
-
-            // Add new access token to the OAuthCache
-            OAuthCache.getInstance().addToCache(oauthCacheKey, tokenToCache);
-
             // Add new access token to the AccessTokenCache
             OAuth2Util.addTokenDOtoCache(accessTokenBean);
 
@@ -475,6 +487,11 @@ public class RefreshGrantHandler extends AbstractAuthorizationGrantHandler {
             accessTokenDO.setAccessToken(accessToken);
             accessTokenDO.setRefreshToken(refreshToken);
         } catch (OAuthSystemException e) {
+            /* Below condition check is added in order to send a client error when the root cause of the exception is
+               actually a client error and not an internal server error. */
+            if (e.getCause() instanceof IdentityOAuth2ClientException) {
+                throw (IdentityOAuth2ClientException) e.getCause();
+            }
             throw new IdentityOAuth2Exception("Error when generating the tokens.", e);
         } catch (InvalidOAuthClientException e) {
             throw new IdentityOAuth2Exception("Error while retrieving oauth issuer for the app with clientId: " +

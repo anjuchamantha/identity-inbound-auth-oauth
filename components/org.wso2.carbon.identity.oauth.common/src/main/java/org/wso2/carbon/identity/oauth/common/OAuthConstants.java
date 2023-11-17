@@ -110,9 +110,22 @@ public final class OAuthConstants {
     public static final String AUTHENTICATED_IDPS = "AuthenticatedIdPs";
     public static final String SESSION_STATE = "session_state";
     public static final String STATE = "state";
+    public static final String AUTHENTICATOR_IDP_SPLITTER = ":";
 
     public static final String SECTOR_IDENTIFIER_URI = "sector_identifier_uri";
     public static final String SUBJECT_TYPE = "subject_type";
+
+    public static final String CNF = "cnf";
+    public static final String MTLS_AUTH_HEADER = "MutualTLS.ClientCertificateHeader";
+    public static final String BEGIN_CERT = "-----BEGIN CERTIFICATE-----";
+    public static final String END_CERT = "-----END CERTIFICATE-----";
+    public static final String JAVAX_SERVLET_REQUEST_CERTIFICATE = "javax.servlet.request.X509Certificate";
+    public static final String CONFIG_NOT_FOUND = "CONFIG_NOT_FOUND";
+    public static final String X5T_S256 = "x5t#S256";
+
+    public static final String ENABLE_TLS_CERT_BOUND_ACCESS_TOKENS_VIA_BINDING_TYPE = "OAuth.OpenIDConnect." +
+            "EnableTLSCertificateBoundAccessTokensViaBindingType";
+
     /**
      * Enum for OIDC supported subject types.
      */
@@ -225,10 +238,34 @@ public final class OAuthConstants {
 
     public static final String REQUEST_BINDING_TYPE = "request";
     public static final String ORG_ID = "org_id";
-    public static final String IS_FAPI_CONFORMANT_APP = "isFAPIConformant";
     public static final String ENABLE_FAPI = "OAuth.OpenIDConnect.FAPI.EnableFAPIValidation";
-    public static final String IS_THIRD_PARTY_APP = "isThirdPartyApp";
+    public static final String ENABLE_DCR_FAPI_ENFORCEMENT = "OAuth.DCRM.EnableFAPIEnforcement";
+    public static final String FAPI_CLIENT_AUTH_METHOD_CONFIGURATION = "OAuth.OpenIDConnect.FAPI." +
+            "AllowedClientAuthenticationMethods.AllowedClientAuthenticationMethod";
+    public static final String FAPI_SIGNATURE_ALGORITHM_CONFIGURATION = "OAuth.OpenIDConnect.FAPI." +
+            "AllowedSignatureAlgorithms.AllowedSignatureAlgorithm";
+    public static final String VALIDATE_SECTOR_IDENTIFIER = "OAuth.DCRM.EnableSectorIdentifierURIValidation";
+    public static final String TOKEN_EP_SIGNATURE_ALG_CONFIGURATION = "OAuth.OpenIDConnect" +
+            ".SupportedTokenEndpointSigningAlgorithms.SupportedTokenEndpointSigningAlgorithm";
+    public static final String ID_TOKEN_SIGNATURE_ALG_CONFIGURATION = "OAuth.OpenIDConnect" +
+            ".SupportedIDTokenSigningAlgorithms.SupportedIDTokenSigningAlgorithm";
+    public static final String REQUEST_OBJECT_SIGNATURE_ALG_CONFIGURATION = "OAuth.OpenIDConnect" +
+            ".SupportedRequestObjectSigningAlgorithms.SupportedRequestObjectSigningAlgorithm";
+    public static final String ID_TOKEN_ENCRYPTION_ALGORITHM = "OAuth.OpenIDConnect." +
+            "SupportedIDTokenEncryptionAlgorithms.SupportedIDTokenEncryptionAlgorithm";
+    public static final String REQUEST_OBJECT_ENCRYPTION_ALGORITHM = "OAuth.OpenIDConnect." +
+            "SupportedRequestObjectEncryptionAlgorithms.SupportedRequestObjectEncryptionAlgorithm";
+    public static final String ID_TOKEN_ENCRYPTION_METHOD = "OAuth.OpenIDConnect.SupportedIDTokenEncryptionMethods." +
+            "SupportedIDTokenEncryptionMethod";
+    public static final String REQUEST_OBJECT_ENCRYPTION_METHOD = "OAuth.OpenIDConnect." +
+            "SupportedRequestObjectEncryptionMethods.SupportedRequestObjectEncryptionMethod";
+    public static final String IS_PUSH_AUTHORIZATION_REQUEST = "isPushAuthorizationRequest";
 
+
+    public static final String IS_THIRD_PARTY_APP = "isThirdPartyApp";
+    public static final String PRIVATE_KEY_JWT = "private_key_jwt";
+    public static final String TLS_CLIENT_AUTH = "tls_client_auth";
+    public static final String RESTRICTED_ENCRYPTION_ALGORITHM = "RSA1_5";
 
     private OAuthConstants() {
 
@@ -248,6 +285,8 @@ public final class OAuthConstants {
         public static final String JWT_BEARER = "urn:ietf:params:oauth:grant-type:jwt-bearer";
         public static final String REFRESH_TOKEN = "refresh_token";
         public static final String DEVICE_CODE = "device_code";
+        public static final String ORGANIZATION_SWITCH = "organization_switch";
+        public static final String ORGANIZATION_SWITCH_CC = "organization_switch_cc";
 
         private GrantTypes() {
 
@@ -426,6 +465,7 @@ public final class OAuthConstants {
 
         public static final String APP_STATE_ACTIVE = "ACTIVE";
         public static final String APP_STATE_REVOKED = "REVOKED";
+        public static final String APP_STATE_DELETED = "DELETED";
 
         private OauthAppStates() {
 
@@ -573,6 +613,7 @@ public final class OAuthConstants {
         public static final String SUBJECT_TYPE = "subjectType";
         public static final String REQUEST_OBJECT_ENCRYPTION_ALGORITHM = "requestObjectEncryptionAlgorithm";
         public static final String REQUEST_OBJECT_ENCRYPTION_METHOD = "requestObjectEncryptionMethod";
+        public static final String IS_FAPI_CONFORMANT_APP = "isFAPIConformant";
 
         private OIDCConfigProperties() {
 
@@ -600,6 +641,8 @@ public final class OAuthConstants {
         public static final String SHA1 = "SHA-1";
         public static final String KID_HASHING_ALGORITHM = SHA256;
         public static final String PREVIOUS_KID_HASHING_ALGORITHM = SHA1;
+        public static final String PS256 = "PS256";
+        public static final String ES256 = "ES256";
 
         private SignatureAlgorithms() {
 
@@ -731,6 +774,7 @@ public final class OAuthConstants {
         public static final String QUERY_JWT = "query.jwt";
         public static final String FRAGMENT_JWT = "fragment.jwt";
         public static final String FORM_POST_JWT = "form_post.jwt";
+        public static final String DIRECT = "direct"; // Used for API based authentication.
     }
 
 }
