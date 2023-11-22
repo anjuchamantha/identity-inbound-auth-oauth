@@ -30,6 +30,7 @@ import org.apache.commons.lang.ArrayUtils;
 import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.cxf.interceptor.InInterceptors;
 import org.apache.http.NameValuePair;
 import org.apache.http.client.utils.URIBuilder;
 import org.apache.oltu.oauth2.as.request.OAuthAuthzRequest;
@@ -55,6 +56,7 @@ import org.wso2.carbon.identity.application.authentication.framework.exception.a
 import org.wso2.carbon.identity.application.authentication.framework.handler.request.impl.consent.ClaimMetaData;
 import org.wso2.carbon.identity.application.authentication.framework.handler.request.impl.consent.ConsentClaimsData;
 import org.wso2.carbon.identity.application.authentication.framework.handler.request.impl.consent.exception.SSOConsentServiceException;
+import org.wso2.carbon.identity.application.authentication.framework.model.AuthenticatedIdPData;
 import org.wso2.carbon.identity.application.authentication.framework.model.AuthenticatedUser;
 import org.wso2.carbon.identity.application.authentication.framework.model.AuthenticationResult;
 import org.wso2.carbon.identity.application.authentication.framework.model.CommonAuthRequestWrapper;
@@ -75,6 +77,8 @@ import org.wso2.carbon.identity.central.log.mgt.utils.LoggerUtils;
 import org.wso2.carbon.identity.claim.metadata.mgt.ClaimMetadataHandler;
 import org.wso2.carbon.identity.claim.metadata.mgt.exception.ClaimMetadataException;
 import org.wso2.carbon.identity.claim.metadata.mgt.model.ExternalClaim;
+import org.wso2.carbon.identity.client.attestation.filter.ClientAttestationProxy;
+import org.wso2.carbon.identity.client.attestation.mgt.model.ClientAttestationContext;
 import org.wso2.carbon.identity.core.ServiceURLBuilder;
 import org.wso2.carbon.identity.core.URLBuilderException;
 import org.wso2.carbon.identity.core.model.UserAgent;
@@ -87,6 +91,7 @@ import org.wso2.carbon.identity.oauth.cache.AuthorizationGrantCacheKey;
 import org.wso2.carbon.identity.oauth.cache.SessionDataCache;
 import org.wso2.carbon.identity.oauth.cache.SessionDataCacheEntry;
 import org.wso2.carbon.identity.oauth.cache.SessionDataCacheKey;
+import org.wso2.carbon.identity.oauth.client.authn.filter.OAuthClientAuthenticatorProxy;
 import org.wso2.carbon.identity.oauth.common.OAuth2ErrorCodes;
 import org.wso2.carbon.identity.oauth.common.OAuthConstants;
 import org.wso2.carbon.identity.oauth.common.exception.InvalidOAuthClientException;
@@ -190,6 +195,7 @@ import static org.wso2.carbon.identity.application.authentication.endpoint.util.
 import static org.wso2.carbon.identity.application.authentication.endpoint.util.Constants.REQUESTED_CLAIMS;
 import static org.wso2.carbon.identity.application.authentication.endpoint.util.Constants.USER_CLAIMS_CONSENT_ONLY;
 import static org.wso2.carbon.identity.application.authentication.framework.util.FrameworkConstants.REQUEST_PARAM_SP;
+import static org.wso2.carbon.identity.client.attestation.mgt.utils.Constants.CLIENT_ATTESTATION_CONTEXT;
 import static org.wso2.carbon.identity.oauth.common.OAuthConstants.LogConstants.InputKeys.RESPONSE_TYPE;
 import static org.wso2.carbon.identity.oauth.common.OAuthConstants.OAuth20Params.CLIENT_ID;
 import static org.wso2.carbon.identity.oauth.common.OAuthConstants.OAuth20Params.REDIRECT_URI;
@@ -221,6 +227,7 @@ import static org.wso2.carbon.identity.openidconnect.model.Constants.STATE;
  * Rest implementation of OAuth2 authorize endpoint.
  */
 @Path("/authorize")
+@InInterceptors(classes = {OAuthClientAuthenticatorProxy.class, ClientAttestationProxy.class})
 public class OAuth2AuthzEndpoint {
 
     private static final Log log = LogFactory.getLog(OAuth2AuthzEndpoint.class);
@@ -304,6 +311,11 @@ public class OAuth2AuthzEndpoint {
             OAuthClientAuthnContext oAuthClientAuthnContext = getClientAuthnContext(request);
             if (!oAuthClientAuthnContext.isAuthenticated()) {
                 return handleAuthFailureResponse(oAuthClientAuthnContext);
+            }
+
+            ClientAttestationContext clientAttestationContext = getClientAttestationContext(request);
+            if (clientAttestationContext.isAttestationEnabled() && !clientAttestationContext.isAttested()) {
+                return handleAttestationFailureResponse(clientAttestationContext);
             }
         }
         OAuthMessage oAuthMessage;
@@ -3963,7 +3975,62 @@ public class OAuth2AuthzEndpoint {
             for (AuthHistory authHistory : sessionContext.getSessionAuthHistory().getHistory()) {
                 authMethods.add(authHistory.toTranslatableString());
             }
+            authMethods = getAMRValues(authMethods, sessionContext.getAuthenticatedIdPs());
             resultFromLogin.getParamMap().put(OAuthConstants.AMR, authMethods.toArray(new String[authMethods.size()]));
+        }
+    }
+
+    /**
+     * Replaces the authenticator names with the AMR values sent by the IDP.
+     *
+     * @param authMethods       The list of authentication methods set by resident IDP.
+     * @param authenticatedIdPs The authenticated IDPs.
+     */
+    private List<String> getAMRValues(List<String> authMethods, Map<String, AuthenticatedIdPData> authenticatedIdPs) {
+
+        boolean readAMRValueFromIdp = Boolean.parseBoolean(IdentityUtil.getProperty(
+                OAuthConstants.READ_AMR_VALUE_FROM_IDP));
+        if (readAMRValueFromIdp) {
+            List<String> resultantAuthMethods = new ArrayList<>();
+            Object[] idpKeySet = authenticatedIdPs.keySet().toArray();
+            for (int i = 0; i < authMethods.size(); i++) {
+                boolean amrFieldExists = false;
+                if (idpKeySet[i] != null) {
+                    String idpKey = (String) idpKeySet[i];
+                    if (authenticatedIdPs.get(idpKey) != null && authenticatedIdPs.get(idpKey).getUser() != null
+                            && authenticatedIdPs.get(idpKey).getUser().getUserAttributes() != null) {
+                        for (Map.Entry<ClaimMapping, String> entry : authenticatedIdPs.get(idpKey).getUser()
+                                .getUserAttributes().entrySet()) {
+                            if (entry.getKey().getLocalClaim().getClaimUri().equals(OAuthConstants.AMR)) {
+                                amrFieldExists = true;
+                                addToAuthMethods(entry.getValue(), resultantAuthMethods);
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (!amrFieldExists) {
+                    resultantAuthMethods.add(authMethods.get(i));
+                }
+            }
+            return resultantAuthMethods;
+        }
+        return authMethods;
+    }
+
+    /**
+     * Adds the authentication methods to the list.
+     *
+     * @param amrValue             Comma separated authentication method value or values.
+     * @param resultantAuthMethods The resultant list of authentication methods.
+     */
+    private void addToAuthMethods(String amrValue, List<String> resultantAuthMethods) {
+
+        if (amrValue.contains(",")) {
+            String[] amrValues = amrValue.split(",");
+            resultantAuthMethods.addAll(Arrays.asList(amrValues));
+        } else {
+            resultantAuthMethods.add(amrValue);
         }
     }
 
@@ -4509,6 +4576,20 @@ public class OAuth2AuthzEndpoint {
         return oAuthClientAuthnContext;
     }
 
+    private ClientAttestationContext getClientAttestationContext(HttpServletRequest request) {
+
+        ClientAttestationContext clientAttestationContext;
+        Object clientAttestationContextObj = request.getAttribute(CLIENT_ATTESTATION_CONTEXT);
+        if (clientAttestationContextObj instanceof ClientAttestationContext) {
+            clientAttestationContext = (ClientAttestationContext) clientAttestationContextObj;
+        } else {
+            clientAttestationContext = new ClientAttestationContext();
+            clientAttestationContext.setAttestationEnabled(false);
+            clientAttestationContext.setAttested(false);
+        }
+        return clientAttestationContext;
+    }
+
     /**
      * Handle the authentication failure response for API based authentication.
      *
@@ -4522,5 +4603,11 @@ public class OAuth2AuthzEndpoint {
             return ApiAuthnUtils.buildResponseForServerError(new AuthServiceException(msg), log);
         }
         return ApiAuthnUtils.buildResponseForAuthorizationFailure(oAuthClientAuthnContext.getErrorMessage(), log);
+    }
+
+    private Response handleAttestationFailureResponse(ClientAttestationContext clientAttestationContext) {
+
+        return ApiAuthnUtils.buildResponseForAuthorizationFailure(
+                clientAttestationContext.getValidationFailureMessage(), log);
     }
 }
